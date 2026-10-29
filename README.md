@@ -16,3 +16,22 @@
 1. `pip install -r requirements.txt`
 2. 填入你的 DeepSeek API Key
 3. `streamlit run app.py`
+
+## 🏗️ 系统架构
+
+```text
+Streamlit Web 界面 (app.py)
+    │
+    ├── 用户自然语言输入 (聊天框)
+    ▼
+DeepSeek 大模型 (Agent 核心)
+    │
+    ├── 工具 1：add_todo(task) ────> 写入本地文件 (todo.txt)
+    └── 工具 2：get_weather(city) ─> 请求外部天气 API (wttr.in)
+    │
+    ▼
+桌面悬浮便签守护进程 (desktop_sticky.pyw)
+    │
+    ├── 每 1 秒轮询读取 (todo.txt)
+    ├── 识别标准时间戳格式 [YYYY-MM-DD HH:MM]
+    └── 到点触发：Win系统弹窗 + 提示音
