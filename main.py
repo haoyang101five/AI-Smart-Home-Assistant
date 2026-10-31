@@ -1,6 +1,7 @@
+# -*- coding: utf-8 -*-
 """
 终端 AI 助手：接入 DeepSeek（deepseek-chat），支持两个工具：
-  1. add_todo(task)    - 把任务追加保存到当前目录的 todo.txt
+  1. add_todo(task)    - 把任务保存到当前目录的 todo.db（SQLite）
   2. get_weather(city) - 调用 wttr.in 查询城市天气
 在终端输入指令（如"明天下午3点提醒我开会，顺便查一下天津的天气"），
 模型会自主决定调用哪些工具，工具结果回传后输出一句友好的总结回复。
@@ -8,26 +9,66 @@
 """
 
 import json
+import re
+import sys
+import traceback
 from datetime import datetime, timedelta
 
 import requests
 from openai import OpenAI
 
+import todo_db
+
+# 强制标准输出 / 错误流使用 UTF-8：
+# Windows 终端编码不是 UTF-8 时，打印中文会触发
+# "'ascii' codec can't encode characters" 报错
+_stdout = sys.stdout
+if hasattr(_stdout, "reconfigure") and _stdout.encoding != "utf-8":
+    _stdout.reconfigure(encoding="utf-8")
+_stderr = sys.stderr
+if hasattr(_stderr, "reconfigure") and _stderr.encoding != "utf-8":
+    _stderr.reconfigure(encoding="utf-8")
+
+
+def safe_print(*args, **kwargs) -> None:
+    """打印兜底：任何编码异常都不允许让程序崩掉"""
+    try:
+        print(*args, **kwargs)
+    except Exception:
+        try:
+            # 退化为 ASCII 可显示的形式（中文变成 ? ），至少保证不抛异常
+            text = " ".join(str(a) for a in args)
+            print(text.encode("ascii", "replace").decode("ascii"), **kwargs)
+        except Exception:
+            pass
+
+
 # ========== 基础配置 ==========
 
 client = OpenAI(
-    api_key="你的API_KEY",
+    # 注意：API Key 只能包含 ASCII 字符。用中文占位符（如"你的API_KEY"）会在
+    # 生成 Authorization 请求头时报 "'ascii' codec can't encode characters"。
+    api_key="sk-xxxxxxxx",
     base_url="https://api.deepseek.com",
+    # 显式指定请求头的字符集，请求体由 SDK 用标准 JSON 序列化
+    default_headers={"Content-Type": "application/json; charset=utf-8"},
 )
 MODEL = "deepseek-chat"
+
+# 识别任务开头的 "[YYYY-MM-DD HH:MM]" 或 "[YYYY-MM-DD HH:MM:SS]" 时间
+TIME_PREFIX = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?)\]\s*")
 
 
 # ========== 工具实现 ==========
 
 def add_todo(task: str) -> str:
-    """把任务追加写入当前目录下的 todo.txt"""
-    with open("todo.txt", "a", encoding="utf-8") as f:
-        f.write(task + "\n")
+    """把任务写入 todo.db；任务以 [时间] 开头时，把该时间存为 remind_time"""
+    task = task.strip()
+    match = TIME_PREFIX.match(task)
+    if match:
+        todo_db.add_todo(task[match.end():].strip(), match.group(1))
+    else:
+        todo_db.add_todo(task, None)
     return "保存成功"
 
 
@@ -55,7 +96,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "add_todo",
-            "description": "把一条待办任务追加保存到 todo.txt 文件中",
+            "description": "把一条待办任务保存到 todo.db 数据库中",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -94,7 +135,7 @@ def get_system_prompt() -> str:
     default_time = (current_time + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")
     return (
         "你是一个终端智能助手，可以使用两个工具：\n"
-        "1. add_todo：把用户的待办任务保存到 todo.txt；\n"
+        "1. add_todo：把用户的待办任务保存到 todo.db 数据库；\n"
         "2. get_weather：查询城市天气。\n"
         f"1. 当前系统时间是 {now}。\n"
         "2. 如果用户让你提醒，但没给具体时间，请默认推算为 5 分钟后"
@@ -136,7 +177,7 @@ def chat(messages: list) -> str:
             messages.append(msg)
             for call in msg.tool_calls:
                 result = run_tool(call.function.name, call.function.arguments)
-                print(f"  [工具] {call.function.name} -> {result}")
+                safe_print(f"  [工具] {call.function.name} -> {result}")
                 messages.append(
                     {
                         "role": "tool",
@@ -148,30 +189,31 @@ def chat(messages: list) -> str:
 
         # 没有工具调用，输出最终回复
         messages.append({"role": "assistant", "content": msg.content})
-        print(f"助手: {msg.content or '(无回复)'}")
+        safe_print(f"助手: {msg.content or '(无回复)'}")
         return msg.content or ""
 
 
 def main() -> None:
-    print("终端 AI 助手已启动（输入 exit / quit / 退出 结束）")
+    safe_print("终端 AI 助手已启动（输入 exit / quit / 退出 结束）")
     messages = [{"role": "system", "content": get_system_prompt()}]
     while True:
         try:
             user_input = input("\n你: ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\n再见！")
+            safe_print("\n再见！")
             break
         if not user_input:
             continue
         if user_input.lower() in {"exit", "quit"} or user_input == "退出":
-            print("再见！")
+            safe_print("再见！")
             break
 
         messages.append({"role": "user", "content": user_input})
         try:
             chat(messages)
         except Exception as e:
-            print(f"出错了: {e}")
+            traceback.print_exc()  # 打印完整堆栈，便于排查
+            safe_print(f"出错了: {e}")
             messages.pop()  # 移除失败的用户消息，避免污染上下文
 
 
